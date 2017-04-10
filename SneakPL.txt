@@ -1,0 +1,580 @@
+###############################################################################
+# Skrypt stra¿nika SneakPL v 6.3 by Rafa³ 'Szajba' Rowiñski 29.06.2013
+#
+# Wymaga/requires:
+# - PathFinder by Karanum
+# - Event_Window by Yanfly
+#
+# self_var:
+# A - atak
+# B - jest niesiony (niewidoczny)
+# C - poszukuje 
+# D - martwy
+#
+# variables:
+# $game_variables[94] - id niesionego stra¿nika
+# $game_variables[95] - przybli¿ony x bohatera
+# $game_variables[96] - przybli¿ony y bohatera
+# $game_variables[97] - sta³a d³ugoœæ alarmu            
+# $game_variables[98] \
+# $game_variables[99] - gracz by³ widoczny w tym miejscu po raz ostatni
+# $game_variables[100] - licznik czasu alarmu
+#
+# switches:
+# $game_switches[98] - bohater jest schowany (niewidoczny)
+# $game_switches[99] - alarm w³aczony
+# $game_switches[100] - znaleziono trupa
+###############################################################################
+
+#dodajemy dostêp do zmiennych
+class Game_Event
+  attr_accessor  :move_speed, :real_x, :real_y, :x, :y
+end  
+
+class Game_Player
+  attr_accessor :move_speed, :x , :y, :opacity, :direction
+end
+
+#klasa wêze³
+class Node 
+attr_accessor :parent, :children, :x, :y
+    def	initialize(parent, x, y)
+		self.parent = parent
+		self.x = x
+		self.y = y
+    self.children = nil #= Array.new
+	end
+end
+
+#labelki
+@@guard_dead_label = "\eC[10]Unieszkodliwiony"
+@@corpse_carried_label = "\eC[14]Niesiesz cia³o"
+@@corpse_dropped_label = "\eC[14]Cia³o upuszczone"
+@@hidden_label = "\eC[14]Ukryty"
+@@out_of_hideout_label = "\eC[14]Opuœci³eœ kryjówkê"
+
+#run once trigger
+@@run_once = false
+
+#d³ugoœæ alarmu [s]
+@@alarm_time = 15
+
+#zasiêg przybli¿ania po³o¿enia bohatera (iloœæ pól)
+@@appr_fields = 10
+
+#promieñ poszukiwañ bohatera (iloœæ pól)
+@@search_radius = 5
+
+#zapamiêtane id stra¿ników
+@@guards_ids = Array.new
+
+#zapamiêtane wspó³rzêdne startowe stra¿ników
+@@guard_start_x = Array.new
+@@guard_start_y = Array.new
+
+#zapamiêtane wspó³rzêdne kryjówek
+@@hideout_xy = Hash.new
+
+#zapamiêtany kierunek gracza
+@@player_direction = Array.new
+
+#deklaracja wezlow
+@@rootNode = Node.new(nil,nil,nil)
+
+@@nLeft = Node.new(@@rootNode,1,0)
+@@nRight = Node.new(@@rootNode,-1,0)
+
+@@n1 = Node.new(@@rootNode,-1,-1)
+@@n4 = Node.new(@@n1,-2,-2)
+@@n9 = Node.new(@@n4,-3,-3)
+
+@@n2 = Node.new(@@rootNode,0,-1)
+
+@@n5 = Node.new(@@n2,-1,-2)
+@@n6 = Node.new(@@n2, 0,-2)
+@@n7 = Node.new(@@n2, 1,-2)
+
+@@n10 = Node.new(@@n5,-2,-3)
+@@n11 = Node.new(@@n5,-1,-3)
+
+@@n16 = Node.new(@@n11,-2,-4)
+@@n17 = Node.new(@@n11,-1,-4)
+
+@@n12 = Node.new(@@n6, 0,-3)
+@@n18 = Node.new(@@n12,0,-4)
+
+@@n13 = Node.new(@@n7,1,-3)
+@@n14 = Node.new(@@n7,2,-3)
+
+@@n19 = Node.new(@@n13,1,-4)
+@@n20 = Node.new(@@n13,2,-4)
+
+@@n3 =  Node.new(@@rootNode,1,-1)
+@@n8 =  Node.new(@@n3,2,-2)
+@@n15 = Node.new(@@n8,3,-3)
+#n = Node.new(n,,)
+
+
+#deklaracja dzieci w grafie
+@@rootNode.children = [@@n1,@@n2,@@n3,@@nLeft,@@nRight]
+@@n1.children = [@@n4]
+@@n4.children = [@@n9]
+@@n2.children = [@@n5,@@n6,@@n7]
+@@n5.children = [@@n10,@@n11]
+@@n11.children = [@@n16,@@n17]
+@@n6.children = [@@n12]
+@@n12.children = [@@n18]
+@@n7.children = [@@n13,@@n14]
+@@n13.children = [@@n19,@@n20]
+@@n3.children = [@@n8]
+@@n8.children = [@@n15]
+#n.children = []
+
+
+#funkcja wykonuj¹ca siê tylko raz
+def run_once
+  if !@@run_once
+    @@run_once = true
+    $game_player.move_speed = 4.2 #ustawia prêdkoœæ chodzenia gracza na 4.2 (stra¿nik ma 2 lub 4)
+    $game_variables[97] = @@alarm_time #ustaw sta³¹ d³ugoœæ alarmu
+    $game_variables[94] = 0 #nie nosimy ¿adnego stra¿nika
+    #$game_map.disable_dashing = true # wy³¹cza bieganie
+
+    puts "wykonano instrukcje startowe"
+  end  
+end   
+
+#funkcja pozwalaj¹ca przenieœæ tra¿nika
+def teleport(x,y,e_id = @event_id)
+  e = $game_map.events[e_id] 
+  if e.real_x != nil 
+    e.real_x = x
+  end  
+  if e.real_y != nil
+    e.real_y = y
+  end  
+  e.x = x
+  e.y = y
+end  
+
+#funkcja zapamiêtywania wspó³rzêdnych startowych stra¿nika
+def saveXY(x,y,e_id)
+  if(@@guard_start_x[e_id] == nil)
+    @@guard_start_x[e_id] = x    
+    @@guards_ids << e_id # dodatkowo zapamiêtujemy id
+    puts "zapamiêtano pozycjê startow¹ #{x}, #{y} dla id #{e_id}"
+  end
+  if(@@guard_start_y[e_id] == nil)
+    @@guard_start_y[e_id] = y
+  end
+end  
+
+#funkcja aproksymacji po³o¿enia bohatera
+def where_is_hero(x, y) #przyjmuje po³o¿enie stra¿nika
+  hx = $game_player.x
+  hy = $game_player.y
+  puts "ostatnio widziany w #{x}, #{y} obecnie w #{hx}, #{hy}"
+  
+  if hx == x && hy < y
+    puts "gracz jest w 1 (góra)"
+    return [x , y - @@appr_fields ]
+  elsif hx > x && hy <  y
+    puts "gracz jest w 2 (góra prawo)"
+    return [x + @@appr_fields , y - @@appr_fields ]
+  elsif hx > x && hy == y
+    puts "gracz jest w 3 (prawo)"
+    return [x + @@appr_fields , y ]
+  elsif hx > x && hy > y 
+    puts "gracz jest w 4 (dó³ prawo)"
+    return [x + @@appr_fields , y + @@appr_fields ]
+  elsif hx == x && hy > y
+    puts "gracz jest w 5 (dó³)"
+    return [x  , y + @@appr_fields ]
+  elsif hx < x && hy > y 
+    puts "gracz jest w 6 (dó³ lewo)"
+    return [x - @@appr_fields , y + @@appr_fields ]
+  elsif hx < x && hy == y
+    puts "gracz jest w 7 (lewo)"
+    return [x - @@appr_fields , y ]
+  elsif  hx < x && hy < y
+    puts "gracz jest w 8 (góra lewo)"
+    return [x - @@appr_fields , y - @@appr_fields ]
+  else  
+    puts "nie wiadomo gdzie jest gracz"
+    return [x, y]
+  end  
+end  
+
+#zabija stra¿nika
+def kill_me(e_id = @event_id)
+  e = $game_map.events[e_id]  
+  if Input.press?(Input::Z) && 
+    e.direction == 8 && e.x == $game_player.x && e.y + 1 == $game_player.y || #patrzy w górê
+    Input.press?(Input::Z) &&
+    e.direction == 6 && e.x - 1 == $game_player.x && e.y == $game_player.y || #patrzy w prawo    
+    Input.press?(Input::Z) &&
+    e.direction == 2 && e.x == $game_player.x && e.y - 1 == $game_player.y || #patrzy w dó³
+    Input.press?(Input::Z) &&
+    e.direction == 4 && e.x + 1 == $game_player.x && e.y == $game_player.y  #patrzy w lewo
+    $game_self_switches[[@map_id, e_id, "D"]] = true #martwy
+    $game_self_switches[[@map_id, e_id, "A"]] = false #walczy
+    $game_self_switches[[@map_id, e_id, "B"]] = false #niewodoczny
+    puts "event #{e_id} unieszkodliwiony"
+    event_window_add_text(@@guard_dead_label)
+    event_window_clear_text
+  end  
+end
+
+#pozwala przenieœæ stra¿nika
+def carry_me(e_id = @event_id)
+  e = $game_map.events[e_id]
+  pressedY = Input.trigger?(Input::Y)
+  Input.update
+  
+  if e.x != -1 && e.y != -1 && $game_self_switches[[@map_id, e_id, "B"]]
+    teleport(-1,-1,e_id)
+  end  
+if $game_variables[94] == 0 #nikogo nie nosimy
+  $game_player.move_speed = 4.2 #ustawia prêdkoœæ chodzenia gracza na 4.2 (stra¿nik ma 2 lub 4)
+  
+  if Input.press?(Input::L) #wciœniêty przycisk Q
+    if     
+    $game_player.direction == 8 && e.x == $game_player.x && e.y + 1 == $game_player.y ||     
+    $game_player.direction == 2 && e.x == $game_player.x && e.y - 1 == $game_player.y ||     
+    $game_player.direction == 6 && e.x - 1 == $game_player.x && e.y == $game_player.y ||       
+    $game_player.direction == 4 && e.x + 1 == $game_player.x && e.y == $game_player.y  
+    puts "event #{e_id} zabrany"
+    $game_variables[94] = e_id #zapamiêtujemy którego stra¿nika niesiemy
+    teleport(-1,-1,e_id) #przenosimy event poza planszê
+    $game_self_switches[[@map_id, e_id, "A"]] = false #walczy
+    $game_self_switches[[@map_id, e_id, "D"]] = false #martwy
+    $game_self_switches[[@map_id, e_id, "B"]] = true  #niewidowczny
+    event_window_add_text(@@corpse_carried_label)
+    event_window_clear_text
+    end
+  end
+else #niesiemy kogoœ
+  $game_player.move_speed = 3.2 #ustawia prêdkoœæ chodzenia gracza na 3.2 (stra¿nik ma 2 lub 4)
+  if Input.press?(Input::X) #wciœniêty przycisk A
+    
+    case $game_player.direction
+              when 8 #góra              
+                @xC = 0
+                @yC = -1
+              when 6 #prawo          
+                @xC = 1
+                @yC = 0
+              when 2 #dó³            
+                @xC = 0
+                @yC = 1
+              when 4 #lewo
+                @xC = -1
+                @yC = 0
+    end
+              
+    #sprawdŸ czy nie k³adzie na przeszkodê
+    if $game_map.check_passage($game_player.x + @xC, $game_player.y + @yC, 0x0f)
+      
+      #sprawdŸ czy ktoœ ju¿ tam le¿y
+      occupied = false
+      @@guards_ids.each do |g_id|
+        if $game_player.x + @xC == $game_map.events[g_id].x && $game_player.y + @yC == $game_map.events[g_id].y # ktoœ tu ju¿ le¿y
+          occupied = true
+          puts "ju¿ ktoœ tu le¿y"
+        end
+      end
+      if !occupied #czy miejsce jest wolne?
+        puts "event #{$game_variables[94]} po³o¿ony"
+        $game_self_switches[[@map_id, $game_variables[94], "D"]] = true #martwy
+        $game_self_switches[[@map_id, $game_variables[94], "B"]] = false #niewidoczny
+        teleport($game_player.x + @xC ,$game_player.y + @yC, $game_variables[94])        
+        $game_variables[94] = 0 #nikogo nie niesiemy
+        event_window_add_text(@@corpse_dropped_label)
+        event_window_clear_text
+      end
+    end
+  end
+  
+end  
+end  
+
+#funkcja kryjówki
+def hide_here(e_id = @event_id)
+  e = $game_map.events[e_id]
+
+  if $game_switches[98] && @@player_direction[e_id] != nil #zapobiega poruszniu gracza - do poprawy
+    $game_player.x = e.x
+    $game_player.y = e.y
+  end  
+  
+  #zapisywanie wspó³rzêdnych kryjówki
+  if @@hideout_xy[e_id] == nil
+    @@hideout_xy[e_id] = [e.x,e.y]
+  end
+  
+  if !$game_switches[98] &&
+    if Input.press?(Input::R)
+    if $game_player.direction == 8 && e.x == $game_player.x && e.y + 1 == $game_player.y ||     
+       $game_player.direction == 2 && e.x == $game_player.x && e.y - 1 == $game_player.y ||     
+       $game_player.direction == 6 && e.x - 1 == $game_player.x && e.y == $game_player.y ||       
+       $game_player.direction == 4 && e.x + 1 == $game_player.x && e.y == $game_player.y  
+       
+       case $game_player.direction
+              when 8 #góra              
+                @xH = 0
+                @yH = -1
+              when 6 #prawo          
+                @xH = 1
+                @yH = 0
+              when 2 #dó³            
+                @xH = 0
+                @yH = 1
+              when 4 #lewo
+                @xH = -1
+                @yH = 0
+              end
+    puts "gracz schowany w #{$game_player.x + @xH}, #{$game_player.y + @yH}"
+    @@player_direction[e_id] = $game_player.direction
+    
+    puts "zapisany kierunek gracza #{@@player_direction[e_id]}"
+    $game_player.x += @xH
+    $game_player.y += @yH
+    $game_player.opacity = 0 #chowamy gracza
+    $game_switches[98] = true #schowany
+    event_window_add_text(@@hidden_label)
+    event_window_clear_text
+    end
+    end
+  else
+    if Input.press?(Input::Y)
+    if e.x == $game_player.x && e.y  == $game_player.y
+      saved_dir = @@player_direction[e_id] #zapisany kierunek wchodzenia do kryjówki
+      case saved_dir
+              when 8 #góra              
+                @xH2 = 0
+                @yH2 = 1
+                $game_player.direction = 2
+              when 6 #prawo          
+                @xH2 = -1
+                @yH2 = 0
+                $game_player.direction = 4
+              when 2 #dó³            
+                @xH2 = 0
+                @yH2 = -1
+                $game_player.direction = 8
+              when 4 #lewo
+                @xH2 = 1
+                @yH2 = 0
+                $game_player.direction = 6
+              end
+      $game_player.x += @xH2
+      $game_player.y += @yH2   
+      @@player_direction = Array.new # zerowanie tablicy zachowanego kierunku
+      puts "gracz wyszed³ z kryjówki"
+      $game_player.opacity = 255 #pe³na widocznoœæ
+      $game_switches[98] = false #wyszed³ z kryjówki
+      event_window_add_text(@@out_of_hideout_label)
+      event_window_clear_text
+    end  
+    end
+  end
+end
+
+def trigger_alarm(e_id = @event_id)
+  e = $game_map.events[e_id]  
+  $game_variables[95] = e.x #x miejsca poszukiwañ
+  $game_variables[96] = e.y #y miejsca poszukiwañ
+  $game_variables[98] = e.x #x miejsca poszukiwañ
+  $game_variables[99] = e.y #y miejsca poszukiwañ
+                  
+  $game_variables[100] = @@alarm_time #alarm cooldown - ustaw licznik czasu alarmu
+  $game_switches[99] = true #alarm
+  puts "w³¹czono alarm w #{e.x}, #{e.y}"    
+end  
+#funkcja stra¿nika
+def guard(n = @@rootNode, e_id = @event_id)
+    e = $game_map.events[e_id]  
+    
+    #uruchamia siê tylko raz
+    run_once    
+    
+    #zapamiêtywanie pozycji startowej stra¿nika
+    saveXY($game_map.events[@event_id].x,$game_map.events[@event_id].y ,e_id)
+    
+    #¿ywy?
+    if $game_self_switches[[@map_id, e_id, "B"]] == false && $game_self_switches[[@map_id, e_id, "D"]] == false
+       
+    #koniec grafu? 
+    if n.children != nil 
+        #przejrzyj wszystkie wêz³y potomne
+        n.children.each do |child|
+            
+            #zmienne x i y w zale¿noœci od kierunku
+            case e.direction
+              when 8 #góra
+              
+                @x = child.x
+                @y = child.y
+              when 6 #prawo
+              
+                @x = -child.y
+                @y = child.x
+              when 2 #dó³
+              
+                @x = -child.x
+                @y = -child.y
+              when 4 #lewo
+              
+                @x = child.y
+                @y = -child.x
+ 
+            end
+            
+            #zmiana prêdkoœci stra¿nika
+            if pathfinding?( e_id ) || $game_self_switches[[@map_id, e_id, "C"]] && $game_switches[99] #poszukuje lub pod¹¿a za bohaterem
+              e.move_speed = 4
+            else
+              e.move_speed = 2
+            end               
+            
+            #sprawdzanie po³o¿enia gracza
+            if e.x + @x <= $game_map.width && e.x + @x >= 0 && e.y + @y <= $game_map.height && e.y + @y >= 0 #pole znajduje siê na mapie?
+              if ( e.x + @x == $game_player.x && e.y + @y == $game_player.y && !$game_switches[98]) #bohater widoczny?
+                puts "wykryty w #{$game_player.x}, #{$game_player.y} przez id: #{e_id} \n" #debug
+                e.balloon_id = 1 #chmórka wykrzyknik
+                $game_switches[99] = false #reset
+                $game_switches[99] = true #ustaw alarm                
+                $game_variables[98] = $game_player.x #last_x \
+                $game_variables[99] = $game_player.y #last_y - gracz by³ widoczny w tym miejscu po raz ostatni
+                $game_variables[100] = @@alarm_time #alarm cooldown - ustaw licznik czasu alarmu
+                $game_self_switches[[@map_id, e_id, "C"]] = false # ustawia stra¿ników na szukanie
+                $game_switches[100] = false # wy³¹czenie alarmu znalezienia martwego stra¿nika
+                
+                #aproksymacja po³o¿enia gracza wzglêdem stra¿nika (w któr¹ stronê uciek³?)
+                appr = where_is_hero(e.x,e.y)
+                puts "przybli¿ona lokalizacja gracza to #{appr[0]}, #{appr[1]} dla id #{e_id} (#{e.x}, #{e.y})"
+                
+                #wybrano x poza plansz¹?
+                if appr[0] < 0 
+                  $game_variables[95] = 0 #korekta
+                elsif appr[0] >= $game_map.width  
+                  $game_variables[95] = $game_map.width - 1
+                else #jest ok
+                  $game_variables[95] = appr[0] #tutaj jest przybli¿ony x
+                end
+                
+                #wybrano y poza plansz¹?
+                if appr[1] < 0
+                  $game_variables[96] = 0
+                elsif appr[1] >= $game_map.height
+                  $game_variables[96] = $game_map.height - 1  
+                else #jest ok
+                  $game_variables[96] = appr[1] #tutaj jest przybli¿ony y
+                end
+                                
+                #resetuj poszukiwanie gracza dla wszystkich stra¿ników
+                @@guards_ids.each do |id| #wykonaj dla ka¿dego stra¿nika
+                  $game_self_switches[[@map_id, id, "C"]] = false
+                end  
+                
+                #czy jest blisko?
+                if child.parent == @@rootNode # jest zaraz przy stra¿niku
+                  e.move_type_toward_player
+                  $game_self_switches[[@map_id, e_id, "A"]] = true #atakuj
+                  puts "walka z event #{e_id}"
+                end                  
+                
+                #podejdŸ do bohatera
+                if !pathfinding?( e_id ) || $game_self_switches[[@map_id, e_id, "C"]]#czy oblicza ju¿ trasê? sprawdz czy nie poszukuje lub nie wraca
+                  puts "idê do gracza #{$game_variables[98]}, #{$game_variables[99]}"
+                  walk_to_short( $game_variables[98], $game_variables[99], @event_id, false )
+                  $game_self_switches[[@map_id, e_id, "C"]] = false #wy³¹cza poszukiwanie
+                end
+              else
+            
+            
+            #bohater schowa³ siê na oczach stra¿nika?    
+            @@hideout_xy.each do |key, xy| 
+                  if $game_switches[98] && (
+                  $game_variables[98] == xy[0] && $game_variables[99]  == xy[1] - 1 ||     
+                  $game_variables[98] == xy[0] + 1 && $game_variables[99]  == xy[1] ||     
+                  $game_variables[98] == xy[0] && $game_variables[99] == xy[1] + 1 ||       
+                  $game_variables[98] == xy[0] - 1 && $game_variables[99] == xy[1]  
+                  )
+                  $game_switches[98] = false #gracz nie jest ju¿ niewidoczny
+                  end
+            end  
+            #szukanie trupa   
+            if e.x + @x <= $game_map.width && e.x + @x >= 0 && e.y + @y <= $game_map.height && e.y + @y >= 0 #pole znajduje siê na mapie?
+              @@guards_ids.each do |g_id| #wykonaj dla ka¿dego stra¿nika
+                if e.x + @x  == $game_map.events[g_id].x && e.y + @y == $game_map.events[g_id].y && e_id != g_id && #trup widoczny?
+                  $game_self_switches[[@map_id, g_id, "D"]] == true
+
+                  $game_self_switches[[@map_id, g_id, "B"]] = true # usuñ trupa
+                  $game_self_switches[[@map_id, g_id, "D"]] = false # martwy
+                  $game_variables[95] = $game_map.events[g_id].x #x mijesca poszukiwañ
+                  $game_variables[96] = $game_map.events[g_id].y #y miejsca poszukiwañ
+                  $game_variables[98] = $game_map.events[g_id].x #x mijesca poszukiwañ
+                  $game_variables[99] = $game_map.events[g_id].y #y miejsca poszukiwañ
+                  
+                  $game_variables[100] = @@alarm_time #alarm cooldown - ustaw licznik czasu alarmu
+                  $game_switches[99] = true #alarm
+                  $game_switches[100] = true #znaleziono trupa
+                  puts "jest trup w #{$game_map.events[g_id].x}, #{$game_map.events[g_id].y}"
+                end                    
+              end   
+            end
+            
+            #przejœcie do miejsca wezwania
+            if $game_switches[99] && !pathfinding?( e_id ) && $game_self_switches[[@map_id, e_id, "C"]] == false
+              e.balloon_id = 2 #chmórka znak zapytania
+              $game_self_switches[[@map_id, e_id, "C"]] = true #rozpocznij poszukiwania
+              puts "idê do miejsca wezwania #{$game_variables[98]}, #{$game_variables[99]}"
+              walk_to_short( $game_variables[98], $game_variables[99], @event_id, true )   
+            end
+            
+            #poszukiwania w czasie alarmu
+            if $game_switches[99] && !pathfinding?( e_id ) && $game_self_switches[[@map_id, e_id, "C"]] == true && $game_variables[100] > 0                
+              
+                x = @@search_radius - rand(2*@@search_radius + 1) # daje wartoœci od -7 do +7 dla @@search_radius = 7
+                y = @@search_radius - rand(2*@@search_radius + 1)
+            
+                while !$game_map.check_passage($game_variables[95] + x, $game_variables[96] + y, 0x0f) #czy na pole mo¿na wejœæ?
+                  x = @@search_radius - rand(2*@@search_radius + 1) # daje wartoœci od -7 do +7 dla @@search_radius = 7
+                  y = @@search_radius - rand(2*@@search_radius + 1)
+                end
+                puts "poszukujê gracza w okolicy #{$game_variables[95] + x},#{$game_variables[96] + y} #{@seeking}"
+                walk_to_short( $game_variables[95] + x , $game_variables[96] + y, @event_id, true )
+
+            end
+            
+            #powrót na miejsce startu po zakoñczeniu alarmu
+            if !$game_switches[99] && $game_self_switches[[@map_id, e_id, "C"]] && !pathfinding?( e_id )
+              e.balloon_id = 5 #chmórka z³y
+              
+              $game_self_switches[[@map_id, e_id, "C"]] = false # zakoñcz poszukiwania
+              
+              #reset aproksymacji po³o¿enia
+              $game_variables[95] = 0 #x -1?
+              $game_variables[96] = 0 #y
+              
+              #$game_switches[100] = false # wy³¹czenie alarmu znalezienia martwego stra¿nika
+              
+              puts "wracam na miejsce startu #{@@guard_start_x[e_id]},#{@@guard_start_y[e_id]}"
+              walk_to_short( @@guard_start_x[e_id], @@guard_start_y[e_id], e_id, true )
+            end 
+            
+            end  
+            end
+            
+            #szukaj dalej            
+            if $game_map.check_passage(e.x + @x, e.y + @y, 0x0f) #czy trafi³ na przeszkodê?
+              if child.children != nil #koniec grafu?
+                guard(child, e_id) #ponowne wywo³anie
+              end
+            end
+          end
+        end
+    end    
+  end
+
